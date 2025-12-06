@@ -11,6 +11,9 @@ A professional Streamlit application for training and comparing multiple machine
 - 📈 **Visualizations**: Interactive charts for metrics comparison and feature importance
 - 🎯 **Feature Importance**: Visualize top features for tree-based models
 - 🔍 **Confusion Matrices**: View confusion matrices for all trained models
+- 🌦️ **Weather Impact Analysis**: Analyze how weather conditions affect flight delays
+- 🔮 **Delay Probability Predictor**: Enter weather conditions to predict delay probability
+- 🔍 **3D Clustering**: Interactive 3D visualization of flight data clusters
 - ⚡ **Performance Optimized**: Automatic downsampling and caching for large datasets
 
 ## Prerequisites
@@ -86,6 +89,18 @@ The app will open in your default web browser at `http://localhost:8501`
    - **Charts**: Interactive bar charts for metrics comparison
    - **Confusion Matrices**: Visual confusion matrices for each model
    - **Feature Importance**: Top 20 features for tree-based models
+
+6. **Weather Impact Analysis:**
+   - View weather impact charts (temperature, wind speed, weather events)
+   - Use the **Delay Probability Predictor** to enter weather conditions
+   - Get delay probability percentage based on trained models
+   - See weather impact breakdown and recommendations
+
+7. **Clustering Analysis:**
+   - Enable clustering in sidebar
+   - Run K-Means or DBSCAN clustering
+   - View interactive 3D cluster visualization
+   - Analyze cluster characteristics
 
 ## BigQuery Setup (Optional)
 
