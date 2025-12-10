@@ -6,6 +6,7 @@ Loads data from BigQuery/GCS and trains multiple ML models
 import streamlit as st
 import pandas as pd
 import numpy as np
+import math
 from google.cloud import bigquery, storage
 from google.oauth2 import service_account
 from sklearn.model_selection import train_test_split
@@ -42,7 +43,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for simpler design
+# Custom CSS for enhanced design
 st.markdown("""
     <style>
     .main > div {
@@ -61,10 +62,34 @@ st.markdown("""
         font-size: 1.3rem;
         margin-top: 1.5rem;
     }
+    h4 {
+        font-size: 1.1rem;
+        margin-top: 1rem;
+        margin-bottom: 0.5rem;
+    }
     .stButton>button {
         width: 100%;
         font-size: 1.1rem;
+        padding: 0.75rem;
+        border-radius: 0.5rem;
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    .stSlider {
+        padding: 0.5rem 0;
+    }
+    .stCheckbox {
+        padding: 0.5rem 0;
+    }
+    .stCheckbox label {
+        font-size: 1rem;
         padding: 0.5rem;
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 2rem;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -78,16 +103,21 @@ BIGQUERY_TABLE = "ml_df"
 def get_gcp_credentials():
     """Get GCP credentials from Streamlit secrets or environment"""
     # Try to get credentials from Streamlit secrets (for Streamlit Cloud)
-    if 'gcp_service_account' in st.secrets:
-        try:
-            # Service account JSON from Streamlit secrets
-            service_account_info = st.secrets['gcp_service_account']
-            if isinstance(service_account_info, str):
-                service_account_info = json.loads(service_account_info)
-            credentials = service_account.Credentials.from_service_account_info(service_account_info)
-            return credentials
-        except Exception as e:
-            st.warning(f"Error loading credentials from secrets: {str(e)}")
+    try:
+        if hasattr(st, 'secrets') and 'gcp_service_account' in st.secrets:
+            try:
+                # Service account JSON from Streamlit secrets
+                service_account_info = st.secrets['gcp_service_account']
+                if isinstance(service_account_info, str):
+                    service_account_info = json.loads(service_account_info)
+                credentials = service_account.Credentials.from_service_account_info(service_account_info)
+                return credentials
+            except Exception as e:
+                # Silently fail for local development
+                pass
+    except Exception:
+        # No secrets file available (local development)
+        pass
     
     # Try environment variable for service account key file
     creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
@@ -116,14 +146,18 @@ def get_default_project_id():
     project_id = os.environ.get('GOOGLE_CLOUD_PROJECT') or os.environ.get('GCP_PROJECT')
     
     # Try Streamlit secrets
-    if not project_id and 'gcp_service_account' in st.secrets:
-        try:
-            service_account_info = st.secrets['gcp_service_account']
-            if isinstance(service_account_info, str):
-                service_account_info = json.loads(service_account_info)
-            project_id = service_account_info.get('project_id')
-        except:
-            pass
+    try:
+        if not project_id and hasattr(st, 'secrets') and 'gcp_service_account' in st.secrets:
+            try:
+                service_account_info = st.secrets['gcp_service_account']
+                if isinstance(service_account_info, str):
+                    service_account_info = json.loads(service_account_info)
+                project_id = service_account_info.get('project_id')
+            except:
+                pass
+    except Exception:
+        # No secrets file available (local development)
+        pass
     
     # If not found, try to get from BigQuery client
     if not project_id:
@@ -323,6 +357,361 @@ def get_numeric_features(df, target_col):
     exclude_cols = [target_col, 'CANCELLED']
     numeric_features = [col for col in numeric_cols if col not in exclude_cols]
     return numeric_features
+
+
+@st.cache_data
+def get_airport_coordinates(df=None):
+    """Get airport coordinates - from data if available, otherwise use common airports"""
+    airport_coords = {}
+    
+    # Try to extract coordinates from data if available
+    if df is not None:
+        # Check for origin coordinates
+        if 'ORIGIN_LAT' in df.columns and 'ORIGIN_LON' in df.columns:
+            origin_coords = df[['ORIGIN', 'ORIGIN_LAT', 'ORIGIN_LON']].drop_duplicates('ORIGIN')
+            for _, row in origin_coords.iterrows():
+                code = str(row['ORIGIN']).strip()
+                if code and code != 'nan' and pd.notna(row['ORIGIN_LAT']) and pd.notna(row['ORIGIN_LON']):
+                    airport_coords[code] = (float(row['ORIGIN_LAT']), float(row['ORIGIN_LON']))
+        
+        # Check for destination coordinates
+        if 'DEST_LAT' in df.columns and 'DEST_LON' in df.columns:
+            dest_coords = df[['DEST', 'DEST_LAT', 'DEST_LON']].drop_duplicates('DEST')
+            for _, row in dest_coords.iterrows():
+                code = str(row['DEST']).strip()
+                if code and code != 'nan' and pd.notna(row['DEST_LAT']) and pd.notna(row['DEST_LON']):
+                    if code not in airport_coords:  # Don't overwrite if already exists
+                        airport_coords[code] = (float(row['DEST_LAT']), float(row['DEST_LON']))
+    
+    # Fallback: Common US airports with coordinates (lat, lon)
+    common_airports = {
+        'ATL': (33.6407, -84.4277),  # Atlanta
+        'LAX': (33.9425, -118.4081),  # Los Angeles
+        'ORD': (41.9742, -87.9073),  # Chicago O'Hare
+        'DFW': (32.8998, -97.0403),  # Dallas/Fort Worth
+        'DEN': (39.8561, -104.6737),  # Denver
+        'JFK': (40.6413, -73.7781),  # New York JFK
+        'SFO': (37.6213, -122.3790),  # San Francisco
+        'SEA': (47.4502, -122.3088),  # Seattle
+        'LAS': (36.0840, -115.1537),  # Las Vegas
+        'MIA': (25.7959, -80.2870),  # Miami
+        'CLT': (35.2144, -80.9473),  # Charlotte
+        'PHX': (33.4342, -112.0116),  # Phoenix
+        'EWR': (40.6895, -74.1745),  # Newark
+        'IAH': (29.9902, -95.3368),  # Houston Intercontinental
+        'MCO': (28.4312, -81.3083),  # Orlando
+        'MSP': (44.8831, -93.2218),  # Minneapolis
+        'DTW': (42.2162, -83.3554),  # Detroit
+        'PHL': (39.8719, -75.2411),  # Philadelphia
+        'LGA': (40.7769, -73.8740),  # LaGuardia
+        'BOS': (42.3656, -71.0096),  # Boston
+        'FLL': (26.0742, -80.1506),  # Fort Lauderdale
+        'IAD': (38.9531, -77.4565),  # Washington Dulles
+        'DCA': (38.8512, -77.0402),  # Washington Reagan
+        'SLC': (40.7899, -111.9791),  # Salt Lake City
+        'MDW': (41.7868, -87.7522),  # Chicago Midway
+        'HNL': (21.3206, -157.9242),  # Honolulu
+        'BWI': (39.1774, -76.6684),  # Baltimore
+        'DAL': (32.8471, -96.8518),  # Dallas Love
+        'HOU': (29.6454, -95.2789),  # Houston Hobby
+        'OAK': (37.8044, -122.2711),  # Oakland
+        'SAN': (32.7338, -117.1933),  # San Diego
+        'PDX': (45.5898, -122.5951),  # Portland
+        'STL': (38.7487, -90.3700),  # St. Louis
+        'TPA': (27.9755, -82.5332),  # Tampa
+        'BNA': (36.1263, -86.6774),  # Nashville
+        'AUS': (30.1945, -97.6699),  # Austin
+        'ACV': (40.9781, -124.1086),  # Arcata/Eureka
+        'ABE': (40.6524, -75.4404),  # Allentown/Bethlehem
+        'ALB': (42.7483, -73.8017),  # Albany
+        'AMA': (35.2194, -101.7059),  # Amarillo
+        'ANC': (61.1741, -149.9964),  # Anchorage
+        'ATW': (44.2581, -88.5191),  # Appleton
+        'AVL': (35.4362, -82.5418),  # Asheville
+        'BDL': (41.9389, -72.6832),  # Hartford
+        'BFL': (35.4336, -119.0567),  # Bakersfield
+        'BGM': (42.2087, -75.9798),  # Binghamton
+        'BHM': (33.5629, -86.7535),  # Birmingham
+        'BIL': (45.8077, -108.5429),  # Billings
+        'BIS': (46.7727, -100.7460),  # Bismarck
+        'BKG': (36.5321, -93.2005),  # Branson
+        'BPT': (29.9508, -94.0207),  # Beaumont
+        'BQK': (31.2588, -81.4665),  # Brunswick
+        'BTR': (30.5332, -91.1496),  # Baton Rouge
+        'BTV': (44.4719, -73.1533),  # Burlington
+        'BUF': (42.9405, -78.7322),  # Buffalo
+        'BUR': (34.2006, -118.3587),  # Burbank
+        'CAE': (33.9388, -81.1195),  # Columbia
+        'CAK': (40.9163, -81.4422),  # Akron/Canton
+        'CHS': (32.8986, -80.0405),  # Charleston
+        'CID': (41.8847, -91.7108),  # Cedar Rapids
+        'CLE': (41.4117, -81.8498),  # Cleveland
+        'CMH': (39.9980, -82.8919),  # Columbus
+        'COS': (38.8058, -104.7008),  # Colorado Springs
+        'CRP': (27.7704, -97.5012),  # Corpus Christi
+        'CRW': (38.3731, -81.5932),  # Charleston WV
+        'CVG': (39.0488, -84.6678),  # Cincinnati
+        'DAY': (39.9024, -84.2194),  # Dayton
+        'DRO': (37.1515, -107.7540),  # Durango
+        'DSM': (41.5340, -93.6631),  # Des Moines
+        'ELP': (31.8073, -106.3776),  # El Paso
+        'ERI': (42.0820, -80.1762),  # Erie
+        'EUG': (44.1246, -123.2120),  # Eugene
+        'EVV': (38.0367, -87.5327),  # Evansville
+        'FAR': (46.9207, -96.8158),  # Fargo
+        'FAT': (36.7762, -119.7181),  # Fresno
+        'FCA': (48.3105, -114.2560),  # Kalispell
+        'FNT': (42.9654, -83.7436),  # Flint
+        'FSD': (43.5820, -96.7419),  # Sioux Falls
+        'GEG': (47.6199, -117.5338),  # Spokane
+        'GFK': (47.9493, -97.1761),  # Grand Forks
+        'GJT': (39.1224, -108.5267),  # Grand Junction
+        'GNV': (29.6901, -82.2718),  # Gainesville
+        'GPT': (30.4073, -89.0701),  # Gulfport
+        'GRB': (44.4851, -88.1296),  # Green Bay
+        'GSO': (36.0977, -79.9373),  # Greensboro
+        'GSP': (34.8957, -82.2189),  # Greenville
+        'GUM': (13.4835, 144.7959),  # Guam
+        'HDN': (40.4811, -107.2177),  # Hayden
+        'HRL': (26.2285, -97.6544),  # Harlingen
+        'HSV': (34.6372, -86.7751),  # Huntsville
+        'ICT': (37.6499, -97.4331),  # Wichita
+        'ILM': (34.2706, -77.9026),  # Wilmington
+        'IND': (39.7173, -86.2944),  # Indianapolis
+        'ISP': (40.7952, -73.1002),  # Islip
+        'JAN': (32.3112, -90.0759),  # Jackson
+        'JAX': (30.4941, -81.6879),  # Jacksonville
+        'JNU': (58.3549, -134.5763),  # Juneau
+        'KOA': (19.7388, -156.0456),  # Kona
+        'LAN': (42.7787, -84.5874),  # Lansing
+        'LBB': (33.6636, -101.8228),  # Lubbock
+        'LEX': (38.0365, -84.6059),  # Lexington
+        'LFT': (30.2053, -91.9877),  # Lafayette
+        'LIT': (34.7294, -92.2243),  # Little Rock
+        'MAF': (31.9425, -102.2019),  # Midland
+        'MCI': (39.2976, -94.7139),  # Kansas City
+        'MEM': (35.0424, -89.9767),  # Memphis
+        'MFE': (26.1758, -98.2386),  # McAllen
+        'MHT': (42.9326, -71.4357),  # Manchester
+        'MLI': (41.4485, -90.5075),  # Moline
+        'MOB': (30.6912, -88.2428),  # Mobile
+        'MSN': (43.1399, -89.3375),  # Madison
+        'MSY': (29.9934, -90.2581),  # New Orleans
+        'MYR': (33.6797, -78.9283),  # Myrtle Beach
+        'OAJ': (34.8292, -77.6121),  # Jacksonville NC
+        'OKC': (35.3931, -97.6007),  # Oklahoma City
+        'OMA': (41.3032, -95.8941),  # Omaha
+        'ONT': (34.0560, -117.6012),  # Ontario
+        'PBI': (26.6832, -80.0956),  # West Palm Beach
+        'PIA': (40.6642, -89.6933),  # Peoria
+        'PIT': (40.4915, -80.2329),  # Pittsburgh
+        'PNS': (30.4734, -87.1866),  # Pensacola
+        'PVD': (41.7326, -71.4204),  # Providence
+        'RDU': (35.8776, -78.7875),  # Raleigh/Durham
+        'RIC': (37.5052, -77.3197),  # Richmond
+        'RNO': (39.4991, -119.7681),  # Reno
+        'ROA': (37.3255, -79.9754),  # Roanoke
+        'ROC': (43.1189, -77.6724),  # Rochester
+        'RST': (43.9083, -92.5000),  # Rochester MN
+        'RSW': (26.5362, -81.7552),  # Fort Myers
+        'SAV': (32.1276, -81.2021),  # Savannah
+        'SBA': (34.4262, -119.8404),  # Santa Barbara
+        'SBN': (41.7087, -86.3173),  # South Bend
+        'SDF': (38.1741, -85.7365),  # Louisville
+        'SGF': (37.2457, -93.3886),  # Springfield MO
+        'SHV': (32.4466, -93.8256),  # Shreveport
+        'SJC': (37.3626, -121.9290),  # San Jose
+        'SMF': (38.6954, -121.5908),  # Sacramento
+        'SPI': (39.8441, -89.6779),  # Springfield IL
+        'SRQ': (27.3954, -82.5544),  # Sarasota
+        'SYR': (43.1112, -76.1063),  # Syracuse
+        'TOL': (41.5868, -83.8078),  # Toledo
+        'TUL': (36.1984, -95.8881),  # Tulsa
+        'TUS': (32.1161, -110.9410),  # Tucson
+        'TVC': (44.7414, -85.5822),  # Traverse City
+        'TYS': (35.8110, -83.9940),  # Knoxville
+        'VPS': (30.4832, -86.5254),  # Valparaiso
+        'XNA': (36.2819, -94.3068),  # Fayetteville
+        'YUM': (32.6566, -114.6060),  # Yuma
+    }
+    
+    # Add common airports to the dictionary (only if not already present from data)
+    for code, coords in common_airports.items():
+        if code not in airport_coords:
+            airport_coords[code] = coords
+    
+    return airport_coords
+
+
+@st.cache_data
+def get_airport_options(df):
+    """Extract unique airports from data with codes and names"""
+    airports = {}
+    
+    # Check for origin airports
+    if 'ORIGIN' in df.columns:
+        origin_data = df[['ORIGIN']].copy()
+        if 'ORIGIN_CITY_NAME' in df.columns:
+            origin_data['CITY'] = df['ORIGIN_CITY_NAME']
+        if 'ORIGIN_STATE_NM' in df.columns:
+            origin_data['STATE'] = df['ORIGIN_STATE_NM']
+        
+        for _, row in origin_data.drop_duplicates().iterrows():
+            code = str(row['ORIGIN']).strip()
+            if code and code != 'nan':
+                city = str(row.get('CITY', '')).strip() if 'CITY' in row else ''
+                state = str(row.get('STATE', '')).strip() if 'STATE' in row else ''
+                display_name = f"{code}"
+                if city:
+                    display_name += f" - {city}"
+                if state:
+                    display_name += f", {state}"
+                airports[code] = display_name
+    
+    # Check for destination airports
+    if 'DEST' in df.columns:
+        dest_data = df[['DEST']].copy()
+        if 'DEST_CITY_NAME' in df.columns:
+            dest_data['CITY'] = df['DEST_CITY_NAME']
+        if 'DEST_STATE_NM' in df.columns:
+            dest_data['STATE'] = df['DEST_STATE_NM']
+        
+        for _, row in dest_data.drop_duplicates().iterrows():
+            code = str(row['DEST']).strip()
+            if code and code != 'nan':
+                city = str(row.get('CITY', '')).strip() if 'CITY' in row else ''
+                state = str(row.get('STATE', '')).strip() if 'STATE' in row else ''
+                display_name = f"{code}"
+                if city:
+                    display_name += f" - {city}"
+                if state:
+                    display_name += f", {state}"
+                # Add to airports dict if not already there
+                if code not in airports:
+                    airports[code] = display_name
+    
+    # Sort by airport code
+    sorted_airports = dict(sorted(airports.items()))
+    return sorted_airports
+
+
+def create_route_map(origin_code, dest_code, delay_prob=None, df=None):
+    """Create an animated map showing the flight route"""
+    airport_coords = get_airport_coordinates(df)
+    
+    # Get coordinates
+    origin_coords = airport_coords.get(origin_code)
+    dest_coords = airport_coords.get(dest_code)
+    
+    if not origin_coords or not dest_coords:
+        return None
+    
+    # Create figure
+    fig = go.Figure()
+    
+    # Add route line with animation
+    fig.add_trace(go.Scattergeo(
+        lon=[origin_coords[1], dest_coords[1]],
+        lat=[origin_coords[0], dest_coords[0]],
+        mode='lines',
+        line=dict(width=3, color='#FF6B6B'),
+        name='Route',
+        showlegend=False
+    ))
+    
+    # Add origin airport marker
+    fig.add_trace(go.Scattergeo(
+        lon=[origin_coords[1]],
+        lat=[origin_coords[0]],
+        mode='markers+text',
+        marker=dict(size=15, color='#4ECDC4', symbol='circle'),
+        text=[origin_code],
+        textposition='top center',
+        name='Origin',
+        showlegend=False,
+        hovertemplate=f'<b>{origin_code}</b><br>Departure Airport<extra></extra>'
+    ))
+    
+    # Add destination airport marker
+    fig.add_trace(go.Scattergeo(
+        lon=[dest_coords[1]],
+        lat=[dest_coords[0]],
+        mode='markers+text',
+        marker=dict(size=15, color='#FF6B6B', symbol='circle'),
+        text=[dest_code],
+        textposition='top center',
+        name='Destination',
+        showlegend=False,
+        hovertemplate=f'<b>{dest_code}</b><br>Arrival Airport<extra></extra>'
+    ))
+    
+    # Create animated route (great circle path)
+    def great_circle_points(lat1, lon1, lat2, lon2, num_points=50):
+        """Generate points along great circle route"""
+        points = []
+        for i in range(num_points + 1):
+            frac = i / num_points
+            d = math.acos(math.sin(math.radians(lat1)) * math.sin(math.radians(lat2)) +
+                        math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+                        math.cos(math.radians(lon2 - lon1)))
+            if d == 0:
+                a = 1
+            else:
+                a = math.sin((1 - frac) * d) / math.sin(d)
+            b = math.sin(frac * d) / math.sin(d)
+            x = a * math.cos(math.radians(lat1)) * math.cos(math.radians(lon1)) + \
+                b * math.cos(math.radians(lat2)) * math.cos(math.radians(lon2))
+            y = a * math.cos(math.radians(lat1)) * math.sin(math.radians(lon1)) + \
+                b * math.cos(math.radians(lat2)) * math.sin(math.radians(lon2))
+            z = a * math.sin(math.radians(lat1)) + b * math.sin(math.radians(lat2))
+            lat = math.degrees(math.atan2(z, math.sqrt(x * x + y * y)))
+            lon = math.degrees(math.atan2(y, x))
+            points.append((lat, lon))
+        return points
+    
+    # Add animated route path
+    route_points = great_circle_points(origin_coords[0], origin_coords[1], 
+                                      dest_coords[0], dest_coords[1])
+    route_lats = [p[0] for p in route_points]
+    route_lons = [p[1] for p in route_points]
+    
+    # Add animated trace
+    fig.add_trace(go.Scattergeo(
+        lon=route_lons,
+        lat=route_lats,
+        mode='lines',
+        line=dict(width=2, color='#95E1D3', dash='dash'),
+        name='Flight Path',
+        showlegend=False,
+        hovertemplate='Flight Route<extra></extra>'
+    ))
+    
+    # Update layout
+    fig.update_layout(
+        title=dict(
+            text=f"Flight Route: {origin_code} → {dest_code}" + (f" (Delay Risk: {delay_prob:.1%})" if delay_prob else ""),
+            x=0.5,
+            font=dict(size=16)
+        ),
+        geo=dict(
+            projection_type='natural earth',
+            showland=True,
+            landcolor='rgb(243, 243, 243)',
+            coastlinecolor='rgb(204, 204, 204)',
+            showocean=True,
+            oceancolor='rgb(230, 245, 255)',
+            showcountries=True,
+            countrycolor='rgb(204, 204, 204)',
+            lataxis=dict(range=[min(origin_coords[0], dest_coords[0]) - 5, 
+                               max(origin_coords[0], dest_coords[0]) + 5]),
+            lonaxis=dict(range=[min(origin_coords[1], dest_coords[1]) - 10, 
+                               max(origin_coords[1], dest_coords[1]) + 10])
+        ),
+        height=400,
+        margin=dict(l=0, r=0, t=50, b=0)
+    )
+    
+    return fig
 
 
 def perform_clustering(X_scaled, n_clusters, algorithm='K-Means', random_state=42):
@@ -1279,51 +1668,103 @@ def main():
             
             st.divider()
             
-            # Delay Predictor Section
-            st.subheader("🔮 Delay Probability Predictor")
-            st.markdown("**Use Case:** Enter current or forecasted weather conditions to predict flight delay probability for operational planning")
+            # Delay Predictor Section - Minimal Design with Icons
+            st.markdown("---")
+            st.markdown("### 🌤️ Delay Probability Predictor")
+            st.caption("Enter weather conditions and airports to predict flight delay probability")
+            
+            # Get airport options from data
+            airport_options = get_airport_options(df)
+            airport_codes = list(airport_options.keys()) if airport_options else []
+            airport_display = list(airport_options.values()) if airport_options else []
             
             # Get default values from data
             default_temp = df['temp'].median() if 'temp' in df.columns else 60
             default_wind = df['wdsp'].median() if 'wdsp' in df.columns else 10
             default_hour = df['DEP_HOUR'].median() if 'DEP_HOUR' in df.columns else 12
             
-            # Input form - Simplified for practical use
+            # Get default airports from data
+            default_origin = None
+            default_dest = None
+            if 'ORIGIN' in df.columns and len(df['ORIGIN'].mode()) > 0:
+                default_origin = df['ORIGIN'].mode()[0]
+            if 'DEST' in df.columns and len(df['DEST'].mode()) > 0:
+                default_dest = df['DEST'].mode()[0]
+            
+            # Minimal Input form with descriptive icons
             with st.form("weather_prediction_form"):
-                st.write("**Current/Forecasted Weather Conditions**")
-                col1, col2 = st.columns(2)
+                # Airport Selection
+                origin_code = None
+                dest_code = None
+                if airport_codes and len(airport_codes) > 0:
+                    st.markdown("#### ✈️ Flight Route")
+                    airport_col1, airport_col2 = st.columns(2)
+                    
+                    with airport_col1:
+                        origin_idx = 0
+                        if default_origin and default_origin in airport_codes:
+                            origin_idx = airport_codes.index(default_origin)
+                        origin_display = st.selectbox(
+                            "🛫 Departure Airport",
+                            options=airport_display,
+                            index=origin_idx if origin_idx < len(airport_display) else 0,
+                            help="Select your departure airport"
+                        )
+                        origin_code = airport_codes[airport_display.index(origin_display)]
+                    
+                    with airport_col2:
+                        dest_idx = 0
+                        if default_dest and default_dest in airport_codes:
+                            dest_idx = airport_codes.index(default_dest)
+                        dest_display = st.selectbox(
+                            "🛬 Arrival Airport",
+                            options=airport_display,
+                            index=dest_idx if dest_idx < len(airport_display) else 0,
+                            help="Select your arrival airport"
+                        )
+                        dest_code = airport_codes[airport_display.index(dest_display)]
+                    
+                    st.markdown("---")
+                
+                # Weather Conditions
+                col1, col2, col3 = st.columns(3)
                 
                 with col1:
-                    temp = st.number_input("🌡️ Temperature (°F)", min_value=-50.0, max_value=120.0, 
-                                         value=float(default_temp), step=1.0,
-                                         help="Current or forecasted temperature")
-                    wdsp = st.number_input("💨 Wind Speed (mph)", min_value=0.0, max_value=100.0, 
-                                          value=float(default_wind), step=1.0,
-                                          help="Current or forecasted wind speed")
-                    visib = st.number_input("👁️ Visibility (miles)", min_value=0.0, max_value=20.0, 
-                                           value=10.0, step=0.1,
-                                           help="Visibility in miles") if 'visib' in numeric_features else None
+                    temp = st.slider("🌡️ Temperature (°F)", -50.0, 120.0, float(default_temp), 1.0)
+                    if 'visib' in numeric_features:
+                        visib = st.slider("👁️ Visibility (miles)", 0.0, 20.0, 10.0, 0.1)
+                    else:
+                        visib = None
                 
                 with col2:
-                    dewp = st.number_input("💧 Dew Point (°F)", min_value=-50.0, max_value=100.0, 
-                                          value=float(df['dewp'].median()) if 'dewp' in df.columns else 50.0, 
-                                          step=1.0,
-                                          help="Dew point temperature") if 'dewp' in numeric_features else None
-                    dep_hour = st.slider("🕐 Departure Hour", 0, 23, int(default_hour),
-                                        help="Planned departure time (24-hour format)")
+                    wdsp = st.slider("💨 Wind Speed (mph)", 0.0, 100.0, float(default_wind), 1.0)
+                    if 'dewp' in numeric_features:
+                        dewp = st.slider("💧 Dew Point (°F)", -50.0, 100.0, 
+                                        float(df['dewp'].median()) if 'dewp' in df.columns else 50.0, 1.0)
+                    else:
+                        dewp = None
                 
-                st.write("**Active Weather Events**")
-                col3, col4 = st.columns(2)
                 with col3:
+                    dep_hour = st.slider("🕐 Departure Hour", 0, 23, int(default_hour))
+                
+                st.markdown("---")
+                
+                # Weather Events with descriptive icons
+                col4, col5, col6 = st.columns(3)
+                
+                with col4:
                     fog = st.checkbox("🌫️ Fog", value=False) if 'fog' in numeric_features else False
                     rain = st.checkbox("🌧️ Rain/Drizzle", value=False) if 'rain_drizzle' in numeric_features else False
+                
+                with col5:
                     snow = st.checkbox("❄️ Snow/Ice", value=False) if 'snow_ice_pellets' in numeric_features else False
-                with col4:
                     hail = st.checkbox("🧊 Hail", value=False) if 'hail' in numeric_features else False
+                
+                with col6:
                     thunder = st.checkbox("⚡ Thunder", value=False) if 'thunder' in numeric_features else False
                     tornado = st.checkbox("🌪️ Tornado/Funnel Cloud", value=False) if 'tornado_funnel_cloud' in numeric_features else False
                 
-                predict_button = st.form_submit_button("🔮 Predict Delay Probability", type="primary")
+                predict_button = st.form_submit_button("🔮 Predict Delay Probability", type="primary", use_container_width=True)
             
             # Make prediction
             if predict_button:
@@ -1332,6 +1773,24 @@ def main():
                 else:
                     # Prepare input data
                     input_data = {}
+                    
+                    # Handle airport codes if airports were selected
+                    if origin_code and dest_code:
+                        # Check if ORIGIN/DEST are in numeric features (might be encoded)
+                        # If they're categorical, we'll use the mode or a default
+                        if 'ORIGIN' in df.columns:
+                            # Use the selected origin airport's typical values if available
+                            origin_data = df[df['ORIGIN'] == origin_code] if origin_code in df['ORIGIN'].values else df
+                        else:
+                            origin_data = df
+                        
+                        if 'DEST' in df.columns:
+                            dest_data = df[df['DEST'] == dest_code] if dest_code in df['DEST'].values else df
+                        else:
+                            dest_data = df
+                    else:
+                        origin_data = df
+                        dest_data = df
                     
                     # Add all numeric features with default/median values
                     for feature in numeric_features:
@@ -1367,9 +1826,23 @@ def main():
                             input_data[feature] = 1 if thunder else 0
                         elif feature == 'tornado_funnel_cloud':
                             input_data[feature] = 1 if tornado else 0
+                        elif feature == 'ORIGIN' or feature.startswith('ORIGIN_'):
+                            # If ORIGIN is numeric (encoded), use median from origin airport data
+                            if feature in origin_data.columns and origin_data[feature].dtype in [np.number]:
+                                input_data[feature] = origin_data[feature].median() if len(origin_data) > 0 else df[feature].median()
+                            else:
+                                input_data[feature] = df[feature].median() if feature in df.columns else 0
+                        elif feature == 'DEST' or feature.startswith('DEST_'):
+                            # If DEST is numeric (encoded), use median from dest airport data
+                            if feature in dest_data.columns and dest_data[feature].dtype in [np.number]:
+                                input_data[feature] = dest_data[feature].median() if len(dest_data) > 0 else df[feature].median()
+                            else:
+                                input_data[feature] = df[feature].median() if feature in df.columns else 0
                         else:
-                            # Use median for other features
-                            if feature in df.columns:
+                            # Use median for other features, prefer origin airport data if available
+                            if feature in origin_data.columns and origin_data[feature].dtype in [np.number]:
+                                input_data[feature] = origin_data[feature].median() if len(origin_data) > 0 else df[feature].median()
+                            elif feature in df.columns:
                                 input_data[feature] = df[feature].median()
                             else:
                                 input_data[feature] = 0
@@ -1406,42 +1879,70 @@ def main():
                                 st.warning(f"Error predicting with {model_name}: {str(e)}")
                     
                     if predictions:
-                        # Display results
-                        st.success("✅ Prediction Complete!")
+                        # Display results - Minimal design
+                        st.markdown("---")
+                        st.markdown("### Prediction Results")
                         
-                        # Show average prediction
+                        # Show route if airports were selected
+                        if origin_code and dest_code:
+                            st.info(f"✈️ Route: {origin_code} → {dest_code}")
+                        
                         avg_prob = np.mean(list(predictions.values()))
                         
+                        # Main metrics
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("Average Delay Probability", f"{avg_prob:.1%}")
+                            st.metric("Delay Probability", f"{avg_prob:.1%}")
                         with col2:
-                            st.metric("Delay Risk", 
-                                    "🟢 Low" if avg_prob < 0.2 else "🟡 Medium" if avg_prob < 0.4 else "🔴 High")
+                            risk_level = "Low" if avg_prob < 0.2 else "Medium" if avg_prob < 0.4 else "High"
+                            st.metric("Risk Level", risk_level)
                         with col3:
                             st.metric("Models Used", len(predictions))
                         
-                        # Show individual model predictions
-                        st.subheader("Model Predictions")
+                        # Model predictions table
                         pred_df = pd.DataFrame({
                             'Model': list(predictions.keys()),
-                            'Delay Probability': [f"{p:.1%}" for p in predictions.values()]
+                            'Probability': [f"{p:.1%}" for p in predictions.values()]
                         })
-                        st.dataframe(pred_df, use_container_width=True)
+                        st.dataframe(pred_df, use_container_width=True, hide_index=True)
                         
-                        # Visualize
-                        fig_pred = px.bar(x=list(predictions.keys()), y=list(predictions.values()),
-                                         title="Delay Probability by Model",
-                                         labels={'x': 'Model', 'y': 'Delay Probability'},
-                                         text=[f"{p:.1%}" for p in predictions.values()])
-                        fig_pred.update_traces(textposition='outside')
-                        fig_pred.update_layout(yaxis_tickformat='.0%')
-                        st.plotly_chart(fig_pred, use_container_width=True)
+                        # Chart and Map side by side
+                        chart_col, map_col = st.columns(2)
                         
-                        # Weather impact breakdown
-                        st.subheader("🌦️ Weather Impact Breakdown")
+                        with chart_col:
+                            # Simple chart
+                            fig_pred = px.bar(
+                                x=list(predictions.keys()),
+                                y=list(predictions.values()),
+                                labels={'x': 'Model', 'y': 'Delay Probability'},
+                                text=[f"{p:.1%}" for p in predictions.values()]
+                            )
+                            fig_pred.update_traces(textposition='outside')
+                            fig_pred.update_layout(
+                                yaxis_tickformat='.0%',
+                                showlegend=False,
+                                height=400,
+                                margin=dict(l=0, r=0, t=20, b=0),
+                                title="Delay Probability by Model"
+                            )
+                            st.plotly_chart(fig_pred, use_container_width=True)
                         
-                        # Compare with baseline (no adverse weather)
+                        with map_col:
+                            # Route map
+                            if origin_code and dest_code:
+                                route_map = create_route_map(origin_code, dest_code, avg_prob, df)
+                                if route_map:
+                                    st.plotly_chart(route_map, use_container_width=True)
+                                else:
+                                    st.info(f"📍 Map unavailable for {origin_code} → {dest_code}")
+                            else:
+                                st.info("📍 Select airports to view route map")
+                        
+                        st.markdown("---")
+                        
+                        # Weather impact analysis - Minimal
+                        st.markdown("### Weather Impact")
+                        
                         baseline_input = input_data.copy()
                         for event in ['fog', 'rain_drizzle', 'snow_ice_pellets', 'hail', 'thunder', 'tornado_funnel_cloud']:
                             if event in baseline_input:
@@ -1468,39 +1969,42 @@ def main():
                             baseline_avg = np.mean(list(baseline_preds.values()))
                             impact = avg_prob - baseline_avg
                             
-                            st.write(f"**Baseline (No Adverse Weather):** {baseline_avg:.1%}")
-                            st.write(f"**Current Conditions:** {avg_prob:.1%}")
-                            st.write(f"**Weather Impact:** {impact:+.1%} points")
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Baseline", f"{baseline_avg:.1%}")
+                            with col2:
+                                st.metric("Current", f"{avg_prob:.1%}")
+                            with col3:
+                                st.metric("Impact", f"{impact:+.1%}")
                             
                             if impact > 0.1:
-                                st.warning(f"⚠️ Weather conditions increase delay risk by {impact:.1%} points")
+                                st.warning(f"Weather increases delay risk by {impact:.1%}")
                             elif impact < -0.05:
-                                st.success(f"✅ Weather conditions are favorable (reduces risk by {abs(impact):.1%} points)")
+                                st.success(f"Weather reduces delay risk by {abs(impact):.1%}")
                             else:
-                                st.info("ℹ️ Weather conditions have minimal impact on delay risk")
+                                st.info("Weather has minimal impact")
                         
-                        # Recommendations
-                        st.subheader("💡 Recommendations")
+                        # Recommendations - Minimal
                         recommendations = []
-                        
                         if avg_prob > 0.4:
-                            recommendations.append("🔴 **High delay risk** - Consider rescheduling if possible")
+                            recommendations.append("High delay risk - Consider rescheduling")
                         if thunder:
-                            recommendations.append("⚡ **Thunder detected** - Significant delay risk")
+                            recommendations.append("Thunder detected - Significant delay risk")
                         if snow:
-                            recommendations.append("❄️ **Snow/Ice conditions** - High delay probability")
+                            recommendations.append("Snow/Ice conditions - High delay probability")
                         if wdsp > 30:
-                            recommendations.append("💨 **High wind speed** - May cause delays")
+                            recommendations.append(f"High wind speed ({wdsp:.0f} mph) may cause delays")
                         if temp < 20 or temp > 90:
-                            recommendations.append("🌡️ **Extreme temperature** - May affect operations")
+                            recommendations.append(f"Extreme temperature ({temp:.0f}°F) may affect operations")
                         if avg_prob < 0.15:
-                            recommendations.append("✅ **Low delay risk** - Weather conditions are favorable")
+                            recommendations.append("Low delay risk - Conditions are favorable")
                         
                         if recommendations:
+                            st.markdown("### Recommendations")
                             for rec in recommendations:
-                                st.write(rec)
+                                st.write(f"• {rec}")
                         else:
-                            st.info("Weather conditions are within normal operating parameters")
+                            st.info("Weather conditions are within normal parameters")
 
 
 if __name__ == "__main__":
