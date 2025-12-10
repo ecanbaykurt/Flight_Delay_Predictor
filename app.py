@@ -102,6 +102,22 @@ if 'clustering_results' not in st.session_state:
     st.session_state.clustering_results = None
 if 'feature_names' not in st.session_state:
     st.session_state.feature_names = None
+if 'target_col' not in st.session_state:
+    st.session_state.target_col = None
+if 'numeric_features' not in st.session_state:
+    st.session_state.numeric_features = None
+if 'X_scaled' not in st.session_state:
+    st.session_state.X_scaled = None
+if 'scaler' not in st.session_state:
+    st.session_state.scaler = None
+if 'X_train' not in st.session_state:
+    st.session_state.X_train = None
+if 'X_test' not in st.session_state:
+    st.session_state.X_test = None
+if 'y_train' not in st.session_state:
+    st.session_state.y_train = None
+if 'y_test' not in st.session_state:
+    st.session_state.y_test = None
 
 
 @st.cache_data(ttl=3600)
@@ -204,8 +220,9 @@ def load_data_from_bigquery(num_rows=50000, project_id=None):
         return None
 
 
+@st.cache_data
 def detect_target_column(df):
-    """Auto-detect target column"""
+    """Auto-detect target column - cached for performance"""
     # Check for common target column names
     target_candidates = ['is_delayed', 'DEP_DEL15', 'delayed', 'delay', 'target']
     
@@ -229,8 +246,9 @@ def detect_target_column(df):
     return None
 
 
+@st.cache_data
 def get_numeric_features(df, target_col):
-    """Get numeric feature columns excluding target"""
+    """Get numeric feature columns excluding target - cached for performance"""
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     # Remove target and other non-feature columns
     exclude_cols = [target_col, 'CANCELLED']
@@ -261,9 +279,11 @@ def perform_clustering(X_scaled, n_clusters, algorithm='K-Means', random_state=4
     return cluster_labels, clusterer, metrics
 
 
-def reduce_to_3d(X_scaled, method='PCA', random_state=42, max_samples=10000):
-    """Reduce high-dimensional data to 3D for visualization"""
-    # Sample data if too large for t-SNE
+@st.cache_data
+def reduce_to_3d(X_scaled, method='PCA', random_state=42, max_samples=5000):
+    """Reduce high-dimensional data to 3D for visualization - cached for performance"""
+    # Sample data if too large (especially for t-SNE which is slow)
+    # Reduced max_samples for better performance
     if len(X_scaled) > max_samples:
         indices = np.random.choice(len(X_scaled), max_samples, replace=False)
         X_sample = X_scaled[indices]
@@ -279,7 +299,11 @@ def reduce_to_3d(X_scaled, method='PCA', random_state=42, max_samples=10000):
         return X_3d, sample_indices, {'explained_variance': explained_variance}
     
     elif method == 't-SNE':
-        reducer = TSNE(n_components=3, random_state=random_state, perplexity=30, n_iter=1000)
+        # Reduce perplexity and iterations for faster computation
+        # Use smaller perplexity for smaller datasets
+        n_samples = len(X_sample)
+        perplexity = min(30, max(5, n_samples // 4))
+        reducer = TSNE(n_components=3, random_state=random_state, perplexity=perplexity, n_iter=300, n_jobs=1)
         X_3d = reducer.fit_transform(X_sample)
         return X_3d, sample_indices, {}
     
@@ -602,7 +626,7 @@ def main():
             max_value=300000,
             value=50000,
             step=10000,
-            help="Maximum number of rows to load (downsampled for performance)"
+            help="Maximum number of rows to load (downsampled for performance). Lower values = faster performance."
         )
         
         st.divider()
@@ -672,8 +696,10 @@ def main():
             dim_reduction_method = st.selectbox(
                 "3D Visualization Method",
                 ["PCA", "t-SNE"],
-                help="Method to reduce dimensions to 3D for visualization"
+                help="Method to reduce dimensions to 3D for visualization. PCA is faster, t-SNE is more accurate but slower."
             )
+            if dim_reduction_method == "t-SNE":
+                st.caption("⚠️ Note: t-SNE is slower but provides better visualization. Consider using PCA for faster results.")
         
         st.divider()
         
@@ -733,28 +759,35 @@ def main():
             # Display data info
             if st.session_state.data_loaded and st.session_state.df is not None:
                 df = st.session_state.df
-            
-            # Detect target column
-            target_col = detect_target_column(df)
-            if target_col is None:
-                st.error("Could not detect target column. Please ensure your data has a binary target column.")
-            else:
-                st.info(f"🎯 Target: **{target_col}**")
                 
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Rows", f"{len(df):,}")
-                with col2:
-                    st.metric("Columns", len(df.columns))
-                with col3:
-                    st.metric("Features", len(get_numeric_features(df, target_col)))
+                # Cache target column and features to avoid recomputation
+                if st.session_state.target_col is None:
+                    st.session_state.target_col = detect_target_column(df)
+                target_col = st.session_state.target_col
                 
-                with st.expander("📋 Preview Data"):
-                    st.dataframe(df.head(50))
-                
-                with st.expander("📊 Statistics"):
-                    numeric_features = get_numeric_features(df, target_col)
-                    st.dataframe(df[numeric_features].describe())
+                if target_col is None:
+                    st.error("Could not detect target column. Please ensure your data has a binary target column.")
+                else:
+                    st.info(f"🎯 Target: **{target_col}**")
+                    
+                    # Cache numeric features
+                    if st.session_state.numeric_features is None:
+                        st.session_state.numeric_features = get_numeric_features(df, target_col)
+                    numeric_features = st.session_state.numeric_features
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Rows", f"{len(df):,}")
+                    with col2:
+                        st.metric("Columns", len(df.columns))
+                    with col3:
+                        st.metric("Features", len(numeric_features))
+                    
+                    with st.expander("📋 Preview Data"):
+                        st.dataframe(df.head(50))
+                    
+                    with st.expander("📊 Statistics"):
+                        st.dataframe(df[numeric_features].describe())
     
     # Tab 2: Model Training
     with tab2:
@@ -762,8 +795,14 @@ def main():
             st.info("👈 Please load data first in the Data tab")
         else:
             df = st.session_state.df
-            target_col = detect_target_column(df)
-            numeric_features = get_numeric_features(df, target_col)
+            target_col = st.session_state.target_col or detect_target_column(df)
+            numeric_features = st.session_state.numeric_features or get_numeric_features(df, target_col)
+            
+            # Cache these values
+            if st.session_state.target_col is None:
+                st.session_state.target_col = target_col
+            if st.session_state.numeric_features is None:
+                st.session_state.numeric_features = numeric_features
             
             st.header("Train Models")
             
@@ -771,22 +810,43 @@ def main():
                 if not selected_models:
                     st.error("Please select at least one model from the sidebar")
                 else:
-                    # Prepare features and target
-                    X = df[numeric_features].fillna(0)  # Fill NaN with 0
-                    y = df[target_col].fillna(0)
-                    
-                    # Remove any remaining NaN or inf values
-                    X = X.replace([np.inf, -np.inf], 0)
-                    
-                    # Scale features
-                    scaler = StandardScaler()
-                    X_scaled = scaler.fit_transform(X)
-                    X_scaled = pd.DataFrame(X_scaled, columns=numeric_features)
-                    
-                    # Train-test split
-                    X_train, X_test, y_train, y_test = train_test_split(
-                        X_scaled, y, test_size=test_size, random_state=42, stratify=y
-                    )
+                    # Check if we can reuse cached scaled data (if test_size hasn't changed)
+                    if (st.session_state.X_scaled is not None and 
+                        st.session_state.scaler is not None and
+                        st.session_state.X_train is not None):
+                        # Reuse cached data
+                        X_scaled = st.session_state.X_scaled
+                        scaler = st.session_state.scaler
+                        X_train = st.session_state.X_train
+                        X_test = st.session_state.X_test
+                        y_train = st.session_state.y_train
+                        y_test = st.session_state.y_test
+                        st.info("♻️ Using cached preprocessed data for faster training")
+                    else:
+                        # Prepare features and target
+                        X = df[numeric_features].fillna(0)  # Fill NaN with 0
+                        y = df[target_col].fillna(0)
+                        
+                        # Remove any remaining NaN or inf values
+                        X = X.replace([np.inf, -np.inf], 0)
+                        
+                        # Scale features
+                        scaler = StandardScaler()
+                        X_scaled = scaler.fit_transform(X)
+                        X_scaled = pd.DataFrame(X_scaled, columns=numeric_features)
+                        
+                        # Train-test split
+                        X_train, X_test, y_train, y_test = train_test_split(
+                            X_scaled, y, test_size=test_size, random_state=42, stratify=y
+                        )
+                        
+                        # Cache the processed data
+                        st.session_state.X_scaled = X_scaled
+                        st.session_state.scaler = scaler
+                        st.session_state.X_train = X_train
+                        st.session_state.X_test = X_test
+                        st.session_state.y_train = y_train
+                        st.session_state.y_test = y_test
                     
                     st.info(f"Train set: {len(X_train):,} samples | Test set: {len(X_test):,} samples")
                     
@@ -913,18 +973,23 @@ def main():
             st.header("Clustering Analysis")
             
             df = st.session_state.df
-            target_col = detect_target_column(df)
-            numeric_features = get_numeric_features(df, target_col)
+            target_col = st.session_state.target_col or detect_target_column(df)
+            numeric_features = st.session_state.numeric_features or get_numeric_features(df, target_col)
             
             if st.button("Run Clustering", type="primary"):
                 with st.spinner("Performing clustering analysis..."):
-                    # Prepare data
-                    X = df[numeric_features].fillna(0)
-                    X = X.replace([np.inf, -np.inf], 0)
-                    
-                    # Scale features
-                    scaler_cluster = StandardScaler()
-                    X_scaled = scaler_cluster.fit_transform(X)
+                    # Reuse cached scaled data if available (from model training)
+                    if st.session_state.X_scaled is not None and len(st.session_state.X_scaled) == len(df):
+                        X_scaled = st.session_state.X_scaled.values if isinstance(st.session_state.X_scaled, pd.DataFrame) else st.session_state.X_scaled
+                        st.info("♻️ Using cached scaled data for faster clustering")
+                    else:
+                        # Prepare data
+                        X = df[numeric_features].fillna(0)
+                        X = X.replace([np.inf, -np.inf], 0)
+                        
+                        # Scale features
+                        scaler_cluster = StandardScaler()
+                        X_scaled = scaler_cluster.fit_transform(X)
                     
                     # Perform clustering
                     cluster_labels, clusterer, metrics = perform_clustering(
@@ -937,10 +1002,12 @@ def main():
                     df_with_clusters = df.copy()
                     df_with_clusters['cluster'] = cluster_labels
                     
-                    # Reduce to 3D for visualization
-                    with st.spinner("Reducing dimensions to 3D for visualization..."):
+                    # Reduce to 3D for visualization (cached function)
+                    with st.spinner("Reducing dimensions to 3D for visualization (this may take a moment for t-SNE)..."):
+                        # Convert to numpy array if needed for caching
+                        X_scaled_array = X_scaled.values if isinstance(X_scaled, pd.DataFrame) else X_scaled
                         X_3d, sample_indices, method_info = reduce_to_3d(
-                            X_scaled, 
+                            X_scaled_array, 
                             method=dim_reduction_method,
                             random_state=42
                         )
@@ -1096,8 +1163,8 @@ def main():
             st.warning("⚠️ Please train models first in the Models tab")
         else:
             df = st.session_state.df
-            target_col = detect_target_column(df)
-            numeric_features = get_numeric_features(df, target_col)
+            target_col = st.session_state.target_col or detect_target_column(df)
+            numeric_features = st.session_state.numeric_features or get_numeric_features(df, target_col)
             
             # Weather Impact Analysis Section
             st.subheader("📊 Weather Impact Analysis")
@@ -1242,14 +1309,16 @@ def main():
                     input_df = pd.DataFrame([input_data])
                     input_df = input_df[numeric_features]  # Ensure correct order
                     
-                    # Scale using the same scaler
-                    if 'scaler' in st.session_state:
+                    # Scale using the same scaler (reuse cached scaler)
+                    if 'scaler' in st.session_state and st.session_state.scaler is not None:
                         input_scaled = st.session_state.scaler.transform(input_df)
                     else:
+                        # Fallback: create new scaler if not available
                         scaler = StandardScaler()
                         X_all = df[numeric_features].fillna(0)
                         scaler.fit(X_all)
                         input_scaled = scaler.transform(input_df)
+                        st.session_state.scaler = scaler  # Cache it for next time
                     
                     # Get predictions from all models
                     predictions = {}
