@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from google.cloud import bigquery, storage
+from google.oauth2 import service_account
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
@@ -31,6 +32,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import os
+import json
 
 # Page configuration
 st.set_page_config(
@@ -73,17 +75,63 @@ GCS_PREFIX = "data/Flight/flights_weather_processed/ml_df"
 BIGQUERY_DATASET = "flight_data"
 BIGQUERY_TABLE = "ml_df"
 
+def get_gcp_credentials():
+    """Get GCP credentials from Streamlit secrets or environment"""
+    # Try to get credentials from Streamlit secrets (for Streamlit Cloud)
+    if 'gcp_service_account' in st.secrets:
+        try:
+            # Service account JSON from Streamlit secrets
+            service_account_info = st.secrets['gcp_service_account']
+            if isinstance(service_account_info, str):
+                service_account_info = json.loads(service_account_info)
+            credentials = service_account.Credentials.from_service_account_info(service_account_info)
+            return credentials
+        except Exception as e:
+            st.warning(f"Error loading credentials from secrets: {str(e)}")
+    
+    # Try environment variable for service account key file
+    creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+    if creds_path and os.path.exists(creds_path):
+        try:
+            credentials = service_account.Credentials.from_service_account_file(creds_path)
+            return credentials
+        except Exception as e:
+            st.warning(f"Error loading credentials from file: {str(e)}")
+    
+    # Try to use default credentials (for local development with gcloud auth)
+    try:
+        from google.auth import default
+        credentials, _ = default()
+        return credentials
+    except Exception:
+        pass
+    
+    return None
+
+
 # Try to auto-detect project ID from environment or BigQuery client
 def get_default_project_id():
     """Try to get project ID from environment or BigQuery client"""
     # First try environment variable
     project_id = os.environ.get('GOOGLE_CLOUD_PROJECT') or os.environ.get('GCP_PROJECT')
     
+    # Try Streamlit secrets
+    if not project_id and 'gcp_service_account' in st.secrets:
+        try:
+            service_account_info = st.secrets['gcp_service_account']
+            if isinstance(service_account_info, str):
+                service_account_info = json.loads(service_account_info)
+            project_id = service_account_info.get('project_id')
+        except:
+            pass
+    
     # If not found, try to get from BigQuery client
     if not project_id:
         try:
-            bq_client = bigquery.Client()
-            project_id = bq_client.project
+            credentials = get_gcp_credentials()
+            if credentials:
+                bq_client = bigquery.Client(credentials=credentials)
+                project_id = bq_client.project
         except:
             pass
     
@@ -124,17 +172,29 @@ if 'y_test' not in st.session_state:
 def load_data_from_gcs(num_rows=50000, project_id=None):
     """Load data from GCS parquet files with downsampling"""
     try:
+        # Get credentials
+        credentials = get_gcp_credentials()
+        
         # Use provided project_id or try to auto-detect
         if project_id:
-            storage_client = storage.Client(project=project_id)
+            if credentials:
+                storage_client = storage.Client(project=project_id, credentials=credentials)
+            else:
+                storage_client = storage.Client(project=project_id)
         else:
             # Try to auto-detect project
             detected_project = get_default_project_id()
             if detected_project:
-                storage_client = storage.Client(project=detected_project)
+                if credentials:
+                    storage_client = storage.Client(project=detected_project, credentials=credentials)
+                else:
+                    storage_client = storage.Client(project=detected_project)
             else:
-                # Last resort: try without project (may work if default credentials are set)
-                storage_client = storage.Client()
+                # Last resort: try with credentials if available
+                if credentials:
+                    storage_client = storage.Client(credentials=credentials)
+                else:
+                    storage_client = storage.Client()
         
         bucket = storage_client.bucket(BUCKET)
         
@@ -184,10 +244,19 @@ def load_data_from_gcs(num_rows=50000, project_id=None):
 def load_data_from_bigquery(num_rows=50000, project_id=None):
     """Load data from BigQuery with downsampling"""
     try:
+        # Get credentials
+        credentials = get_gcp_credentials()
+        
         if project_id:
-            bq_client = bigquery.Client(project=project_id)
+            if credentials:
+                bq_client = bigquery.Client(project=project_id, credentials=credentials)
+            else:
+                bq_client = bigquery.Client(project=project_id)
         else:
-            bq_client = bigquery.Client()
+            if credentials:
+                bq_client = bigquery.Client(credentials=credentials)
+            else:
+                bq_client = bigquery.Client()
         
         # Check if table exists
         dataset_ref = bq_client.dataset(BIGQUERY_DATASET)

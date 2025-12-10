@@ -38,6 +38,8 @@ A professional Streamlit application for training and comparing multiple machine
 
 3. **Set up Google Cloud authentication:**
    
+   **For Local Development:**
+   
    Option A: Using Application Default Credentials (Recommended)
    ```bash
    gcloud auth application-default login
@@ -47,6 +49,41 @@ A professional Streamlit application for training and comparing multiple machine
    ```bash
    export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/service-account-key.json"
    ```
+   
+   **For Streamlit Cloud Deployment:**
+   
+   1. Create a service account in Google Cloud Console:
+      - Go to IAM & Admin > Service Accounts
+      - Create a new service account or use an existing one
+      - Grant it the following roles:
+        - `Storage Object Viewer` (for GCS access)
+        - `BigQuery Data Viewer` (for BigQuery access)
+      - Create a JSON key for the service account
+   
+   2. Add the service account JSON to Streamlit Cloud secrets:
+      - In your Streamlit Cloud app, go to Settings > Secrets
+      - Add a new secret with the key `gcp_service_account`
+      - Paste the entire JSON content of your service account key file
+      - The format should be:
+        ```toml
+        [gcp_service_account]
+        type = "service_account"
+        project_id = "your-project-id"
+        private_key_id = "..."
+        private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+        client_email = "your-service-account@project.iam.gserviceaccount.com"
+        client_id = "..."
+        auth_uri = "https://accounts.google.com/o/oauth2/auth"
+        token_uri = "https://oauth2.googleapis.com/token"
+        auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+        client_x509_cert_url = "..."
+        ```
+   
+   3. Alternatively, you can add it as a single JSON string:
+      ```toml
+      [gcp_service_account]
+      # Paste the entire JSON content here as a string
+      ```
 
 ## Usage
 
