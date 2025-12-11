@@ -423,6 +423,7 @@ def get_airport_coordinates(df=None):
         'AUS': (30.1945, -97.6699),  # Austin
         'ACV': (40.9781, -124.1086),  # Arcata/Eureka
         'ABE': (40.6524, -75.4404),  # Allentown/Bethlehem
+        'ABI': (32.4113, -99.6819),  # Abilene Regional
         'ACT': (31.6113, -97.2305),  # Waco Regional
         'ALB': (42.7483, -73.8017),  # Albany
         'AMA': (35.2194, -101.7059),  # Amarillo
